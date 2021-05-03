@@ -21,6 +21,7 @@ from std_msgs.msg import Header
 from sensor_msgs.msg import CameraInfo, Imu, PointField, NavSatFix
 import sensor_msgs.point_cloud2 as pcl2
 from geometry_msgs.msg import TransformStamped, TwistStamped, Transform
+from geometry_msgs.msg import PoseStamped
 from cv_bridge import CvBridge
 import numpy as np
 import argparse
@@ -76,7 +77,7 @@ def save_dynamic_tf(bag, kitti, kitti_type, initial_time):
 
     elif kitti_type.find("odom") != -1:
         timestamps = map(lambda x: initial_time + x.total_seconds(), kitti.timestamps)
-        for timestamp, tf_matrix in zip(timestamps, kitti.T_w_cam0):
+        for timestamp, tf_matrix in zip(timestamps, kitti.poses):
             tf_msg = TFMessage()
             tf_stamped = TransformStamped()
             tf_stamped.header.stamp = rospy.Time.from_sec(timestamp)
@@ -100,8 +101,39 @@ def save_dynamic_tf(bag, kitti, kitti_type, initial_time):
             tf_msg.transforms.append(tf_stamped)
 
             bag.write('/tf', tf_msg, tf_msg.transforms[0].header.stamp)
-          
-        
+
+            # Converting pose to proper orb-slam convetion
+            tf_mat_converted = convert_matrix_to_pose(tf_matrix)
+            t = tf_mat_converted[0:3,3]
+            q = tf.transformations.quaternion_from_matrix(tf_mat_converted)
+
+            pose_msg = PoseStamped()
+            pose_msg.header.stamp = rospy.Time.from_sec(timestamp)
+            pose_msg.header.frame_id = "map"
+            pose_msg.pose.position.x = t[0]
+            pose_msg.pose.position.y = t[1]
+            pose_msg.pose.position.z = t[2]
+            pose_msg.pose.orientation.x = q[0]
+            pose_msg.pose.orientation.y = q[1]
+            pose_msg.pose.orientation.z = q[2]
+            pose_msg.pose.orientation.w = q[3]
+
+            bag.write('kitti/gt_pose', pose_msg, pose_msg.header.stamp)
+
+
+def convert_matrix_to_pose(tf_matrix):
+    # Change convention
+    rot_mat = np.array([[0,0,1,0],
+                        [-1,0,0,0],
+                        [0,-1,0,0],
+                        [0,0,0,1]]).astype(np.float64)
+
+    transf_mat = np.matmul(rot_mat, tf_matrix)
+    transf_mat_for_rot = np.matmul(transf_mat, rot_mat.T)
+    transf_mat[0:3,0:3] = transf_mat_for_rot[0:3,0:3]
+
+    return transf_mat
+
 def save_camera_data(bag, kitti_type, kitti, util, bridge, camera, camera_frame_id, topic, initial_time):
     print("Exporting camera {}".format(camera))
     if kitti_type.find("raw") != -1:
@@ -359,9 +391,6 @@ def run_kitti2bag():
         if not os.path.exists(kitti.sequence_path):
             print('Path {} does not exists. Exiting.'.format(kitti.sequence_path))
             sys.exit(1)
-
-        kitti.load_calib()         
-        kitti.load_timestamps() 
              
         if len(kitti.timestamps) == 0:
             print('Dataset is empty? Exiting.')
@@ -369,7 +398,6 @@ def run_kitti2bag():
             
         if args.sequence in odometry_sequences[:11]:
             print("Odometry dataset sequence {} has ground truth information (poses).".format(args.sequence))
-            kitti.load_poses()
 
         try:
             util = pykitti.utils.read_calib_file(os.path.join(args.dir,'sequences',args.sequence, 'calib.txt'))
@@ -388,4 +416,3 @@ def run_kitti2bag():
             print("## OVERVIEW ##")
             print(bag)
             bag.close()
-
